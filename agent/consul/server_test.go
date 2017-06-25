@@ -35,25 +35,22 @@ func testServerConfig(t *testing.T, NodeName string) (string, *Config) {
 	config.Bootstrap = true
 	config.Datacenter = "dc1"
 	config.DataDir = dir
-	config.RPCAddr = &net.TCPAddr{
-		IP:   []byte{127, 0, 0, 1},
-		Port: getPort(),
-	}
-	config.RPCAdvertise = config.RPCAddr
+	config.RPCAddr = &net.TCPAddr{IP: []byte{127, 0, 0, 1}} // bind to random port
+	// config.RPCAdvertise  will be set after listen to the address of the listener
 	nodeID, err := uuid.GenerateUUID()
 	if err != nil {
 		t.Fatal(err)
 	}
 	config.NodeID = types.NodeID(nodeID)
 	config.SerfLANConfig.MemberlistConfig.BindAddr = "127.0.0.1"
-	config.SerfLANConfig.MemberlistConfig.BindPort = getPort()
+	config.SerfLANConfig.MemberlistConfig.BindPort = 0 // bind to random port unless overwritten later
 	config.SerfLANConfig.MemberlistConfig.SuspicionMult = 2
 	config.SerfLANConfig.MemberlistConfig.ProbeTimeout = 50 * time.Millisecond
 	config.SerfLANConfig.MemberlistConfig.ProbeInterval = 100 * time.Millisecond
 	config.SerfLANConfig.MemberlistConfig.GossipInterval = 100 * time.Millisecond
 
 	config.SerfWANConfig.MemberlistConfig.BindAddr = "127.0.0.1"
-	config.SerfWANConfig.MemberlistConfig.BindPort = getPort()
+	config.SerfWANConfig.MemberlistConfig.BindPort = 0 // bind to random port unless overwritten later
 	config.SerfWANConfig.MemberlistConfig.SuspicionMult = 2
 	config.SerfWANConfig.MemberlistConfig.ProbeTimeout = 50 * time.Millisecond
 	config.SerfWANConfig.MemberlistConfig.ProbeInterval = 100 * time.Millisecond
@@ -88,7 +85,7 @@ func testServerDCBootstrap(t *testing.T, dc string, bootstrap bool) (string, *Se
 	dir, config := testServerConfig(t, name)
 	config.Datacenter = dc
 	config.Bootstrap = bootstrap
-	server, err := NewServer(config)
+	server, err := newServer(config)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -101,7 +98,7 @@ func testServerDCExpect(t *testing.T, dc string, expect int) (string, *Server) {
 	config.Datacenter = dc
 	config.Bootstrap = false
 	config.BootstrapExpect = expect
-	server, err := NewServer(config)
+	server, err := newServer(config)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -112,11 +109,44 @@ func testServerWithConfig(t *testing.T, cb func(c *Config)) (string, *Server) {
 	name := fmt.Sprintf("Node %d", getPort())
 	dir, config := testServerConfig(t, name)
 	cb(config)
-	server, err := NewServer(config)
+	server, err := newServer(config)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	return dir, server
+}
+
+func newServer(c *Config) (*Server, error) {
+	// chain server up notification
+	oldNotify := c.NotifyListen
+	up := make(chan struct{})
+	c.NotifyListen = func() {
+		close(up)
+		if oldNotify != nil {
+			oldNotify()
+		}
+	}
+
+	// start server
+	srv, err := NewServer(c)
+	if err != nil {
+		return nil, err
+	}
+
+	// wait until after listen
+	<-up
+
+	// get the real address
+	// the server already sets the RPCAdvertise address
+	// if it wasn't configured since it needs it for
+	// some initialization
+	//
+	// todo(fs): setting RPCAddr should probably be guarded
+	// todo(fs): but for now it is a shortcut to avoid fixing
+	// todo(fs): tests which depend on that value. They should
+	// todo(fs): just get the listener address instead.
+	c.RPCAddr = srv.Listener.Addr().(*net.TCPAddr)
+	return srv, nil
 }
 
 func TestServer_StartStop(t *testing.T) {
@@ -385,7 +415,7 @@ func TestServer_JoinLAN_TLS(t *testing.T) {
 	conf1.VerifyIncoming = true
 	conf1.VerifyOutgoing = true
 	configureTLS(conf1)
-	s1, err := NewServer(conf1)
+	s1, err := newServer(conf1)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -397,7 +427,7 @@ func TestServer_JoinLAN_TLS(t *testing.T) {
 	conf2.VerifyIncoming = true
 	conf2.VerifyOutgoing = true
 	configureTLS(conf2)
-	s2, err := NewServer(conf2)
+	s2, err := newServer(conf2)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
